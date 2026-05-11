@@ -27,6 +27,13 @@ type assignment struct {
 	name string
 }
 
+type loopExit int
+
+const (
+	exitBreak loopExit = iota
+	exitGoto
+)
+
 type accessKind uint8
 
 const (
@@ -79,7 +86,7 @@ func (s functionState) inspectBlock(block *ast.BlockStmt) {
 			s.inspectBlock(stmt.Body)
 		case *ast.LabeledStmt:
 			if end := s.jumpLoopEnd(block.List, i, stmt.Label.Name); end >= i {
-				s.reportJumpLoop(stmt.Pos(), block.List[i:end+1], block.List[end+1:])
+				s.reportJumpLoop(stmt.Pos(), stmt.Label.Name, block.List[i:end+1], block.List[end+1:])
 			}
 			switch stmt := stmt.Stmt.(type) {
 			case *ast.ForStmt:
@@ -151,7 +158,7 @@ func (s functionState) inspectStmt(stmt ast.Stmt) {
 }
 
 func (s functionState) reportLoop(pos token.Pos, body *ast.BlockStmt, after []ast.Stmt) {
-	assignments := s.assignmentsIn(body.List, pos)
+	assignments := s.assignmentsIn(body.List, pos, exitBreak, "")
 	if len(assignments) == 0 {
 		return
 	}
@@ -160,8 +167,8 @@ func (s functionState) reportLoop(pos token.Pos, body *ast.BlockStmt, after []as
 	}
 }
 
-func (s functionState) reportJumpLoop(pos token.Pos, body, after []ast.Stmt) {
-	assignments := s.assignmentsIn(body, pos)
+func (s functionState) reportJumpLoop(pos token.Pos, label string, body, after []ast.Stmt) {
+	assignments := s.assignmentsIn(body, pos, exitGoto, label)
 	if len(assignments) == 0 {
 		return
 	}
@@ -170,51 +177,76 @@ func (s functionState) reportJumpLoop(pos token.Pos, body, after []ast.Stmt) {
 	}
 }
 
-func (s functionState) assignmentsIn(stmts []ast.Stmt, loopPos token.Pos) []assignment {
-	return slices.Collect(s.assignments(stmts, loopPos))
+func (s functionState) assignmentsIn(stmts []ast.Stmt, loopPos token.Pos, exit loopExit, loopLabel string) []assignment {
+	return slices.Collect(s.assignments(stmts, loopPos, exit, loopLabel))
 }
 
-func (s functionState) assignments(stmts []ast.Stmt, loopPos token.Pos) iter.Seq[assignment] {
+func (s functionState) assignments(stmts []ast.Stmt, loopPos token.Pos, exit loopExit, loopLabel string) iter.Seq[assignment] {
 	return func(yield func(assignment) bool) {
 		seen := make(map[types.Object]bool)
-		for _, stmt := range stmts {
-			for n := range preorder(stmt) {
-				switch n := n.(type) {
-				case *ast.AssignStmt:
-					for i, lhs := range n.Lhs {
-						id, ok := lhs.(*ast.Ident)
-						if !ok {
+		var walk func([]ast.Stmt) bool
+		walk = func(stmts []ast.Stmt) bool {
+			for i, stmt := range stmts {
+				if s.hasExitBeforeContinue(stmts[i+1:], exit, loopLabel) {
+					for _, assignment := range s.directAssignments(stmt, loopPos) {
+						if seen[assignment.obj] {
 							continue
 						}
-						obj := s.assignedObject(n.Tok, id)
-						if obj == nil || seen[obj] || !s.isOuterLocal(obj, loopPos) {
-							continue
-						}
-						if i < len(n.Rhs) && s.isBuiltinAppend(n.Rhs[i]) {
-							continue
-						}
-						seen[obj] = true
-						if !yield(assignment{obj: obj, name: id.Name}) {
-							return
+						seen[assignment.obj] = true
+						if !yield(assignment) {
+							return false
 						}
 					}
-				case *ast.IncDecStmt:
-					id, ok := n.X.(*ast.Ident)
-					if !ok {
-						continue
-					}
-					obj := s.pass.TypesInfo.Uses[id]
-					if obj == nil || seen[obj] || !s.isOuterLocal(obj, loopPos) {
-						continue
-					}
-					seen[obj] = true
-					if !yield(assignment{obj: obj, name: id.Name}) {
-						return
+				}
+				for block := range nestedBlocks(stmt) {
+					if !walk(block) {
+						return false
 					}
 				}
 			}
+			return true
 		}
+		walk(stmts)
 	}
+}
+
+func (s functionState) directAssignments(stmt ast.Stmt, loopPos token.Pos) []assignment {
+	switch stmt := stmt.(type) {
+	case *ast.AssignStmt:
+		return s.assignStmtAssignments(stmt, loopPos)
+	case *ast.IncDecStmt:
+		id, ok := stmt.X.(*ast.Ident)
+		if !ok {
+			return nil
+		}
+		obj := s.pass.TypesInfo.Uses[id]
+		if obj == nil || !s.isOuterLocal(obj, loopPos) {
+			return nil
+		}
+		return []assignment{{obj: obj, name: id.Name}}
+	}
+	return nil
+}
+
+func (s functionState) assignStmtAssignments(stmt *ast.AssignStmt, loopPos token.Pos) []assignment {
+	return slices.Collect(func(yield func(assignment) bool) {
+		for i, lhs := range stmt.Lhs {
+			id, ok := lhs.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			obj := s.assignedObject(stmt.Tok, id)
+			if obj == nil || !s.isOuterLocal(obj, loopPos) {
+				continue
+			}
+			if i < len(stmt.Rhs) && s.isBuiltinAppend(stmt.Rhs[i]) {
+				continue
+			}
+			if !yield(assignment{obj: obj, name: id.Name}) {
+				return
+			}
+		}
+	})
 }
 
 func (s functionState) assignedObject(tok token.Token, id *ast.Ident) types.Object {
@@ -246,6 +278,93 @@ func (s functionState) isOuterLocal(obj types.Object, pos token.Pos) bool {
 		return false
 	}
 	return obj.Pos().IsValid() && obj.Pos() < pos
+}
+
+func (s functionState) hasExitBeforeContinue(stmts []ast.Stmt, exit loopExit, loopLabel string) bool {
+	for _, stmt := range stmts {
+		if hasContinue(stmt) {
+			return false
+		}
+		if isDirectExit(stmt, exit, loopLabel) {
+			return true
+		}
+		if isDirectStop(stmt) {
+			return false
+		}
+	}
+	return false
+}
+
+func isDirectExit(stmt ast.Stmt, exit loopExit, loopLabel string) bool {
+	branch, ok := stmt.(*ast.BranchStmt)
+	if !ok {
+		return false
+	}
+	switch exit {
+	case exitBreak:
+		return branch.Tok == token.BREAK
+	case exitGoto:
+		return branch.Tok == token.GOTO && branch.Label != nil && branch.Label.Name != loopLabel
+	default:
+		return false
+	}
+}
+
+func isDirectStop(stmt ast.Stmt) bool {
+	branch, ok := stmt.(*ast.BranchStmt)
+	if !ok {
+		return false
+	}
+	return branch.Tok == token.BREAK || branch.Tok == token.CONTINUE || branch.Tok == token.GOTO || branch.Tok == token.FALLTHROUGH
+}
+
+func hasContinue(stmt ast.Stmt) bool {
+	found := false
+	root := ast.Node(stmt)
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		if n == nil || found {
+			return true
+		}
+		if n != root {
+			switch n.(type) {
+			case *ast.FuncLit, *ast.ForStmt, *ast.RangeStmt:
+				return false
+			}
+		}
+		branch, ok := n.(*ast.BranchStmt)
+		if ok && branch.Tok == token.CONTINUE {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+func nestedBlocks(stmt ast.Stmt) iter.Seq[[]ast.Stmt] {
+	return func(yield func([]ast.Stmt) bool) {
+		switch stmt := stmt.(type) {
+		case *ast.BlockStmt:
+			yield(stmt.List)
+		case *ast.IfStmt:
+			if !yield(stmt.Body.List) {
+				return
+			}
+			switch els := stmt.Else.(type) {
+			case *ast.BlockStmt:
+				yield(els.List)
+			case *ast.IfStmt:
+				for block := range nestedBlocks(els) {
+					if !yield(block) {
+						return
+					}
+				}
+			}
+		case *ast.LabeledStmt:
+			if block, ok := stmt.Stmt.(*ast.BlockStmt); ok {
+				yield(block.List)
+			}
+		}
+	}
 }
 
 func (s functionState) readAfter(assignments []assignment, stmts []ast.Stmt) (string, bool) {
@@ -363,10 +482,17 @@ func rangeAssignsObject(info *types.Info, stmt *ast.RangeStmt, target types.Obje
 
 func (s functionState) jumpLoopEnd(stmts []ast.Stmt, labelIndex int, label string) int {
 	labelPos := stmts[labelIndex].Pos()
+	backward := false
 	for i := labelIndex + 1; i < len(stmts); i++ {
-		if hasBackwardGoto(stmts[i], label, labelPos) {
-			return i
+		if _, ok := stmts[i].(*ast.LabeledStmt); ok && backward {
+			return i - 1
 		}
+		if hasBackwardGoto(stmts[i], label, labelPos) {
+			backward = true
+		}
+	}
+	if backward {
+		return len(stmts) - 1
 	}
 	return -1
 }

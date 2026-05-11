@@ -4,11 +4,14 @@ package unreturnedcases
 
 var packageTemp int
 
+func rememberInt(int) {}
+
 func FailRangeLoop(xs []int) int {
 	var picked int
 	// Unreturned: Fail
 	for _, x := range xs {
 		picked = x
+		break
 	}
 	return picked
 }
@@ -19,6 +22,7 @@ func FailThreeClauseFor(xs []string) string {
 	for i := 0; i < len(xs); i++ {
 		if xs[i] != "" {
 			picked = xs[i]
+			break
 		}
 	}
 	return picked
@@ -31,6 +35,7 @@ func FailConditionFor(xs []int) int {
 	for i < len(xs) {
 		picked = xs[i]
 		i++
+		break
 	}
 	return picked
 }
@@ -43,9 +48,12 @@ again:
 	if i >= len(xs) {
 		goto done
 	}
+	if xs[i] == 0 {
+		i++
+		goto again
+	}
 	picked = xs[i]
-	i++
-	goto again
+	goto done
 done:
 	return picked
 }
@@ -58,6 +66,47 @@ func FailShadowedAppend(xs []int) []int {
 	// Unreturned: Fail
 	for _, x := range xs {
 		picked = append(picked, x)
+		break
+	}
+	return picked
+}
+
+func FailAssignCallBreak(xs []int) int {
+	var picked int
+	// Unreturned: Fail
+	for _, x := range xs {
+		picked = x
+		rememberInt(picked)
+		break
+	}
+	return picked
+}
+
+func PassNoBreakAfterAssignment(xs []int) int {
+	var picked int
+	for _, x := range xs {
+		picked = x
+	}
+	return picked
+}
+
+func PassAssignThenContinue(xs []int) int {
+	var picked int
+	for _, x := range xs {
+		picked = x
+		continue
+	}
+	return picked
+}
+
+func PassAssignThenPossibleContinue(xs []int) int {
+	var picked int
+	for _, x := range xs {
+		picked = x
+		if x < 0 {
+			continue
+		}
+		break
 	}
 	return picked
 }
@@ -66,6 +115,7 @@ func PassRangeNoReadAfter(xs []int) {
 	var picked int
 	for _, x := range xs {
 		picked = x
+		break
 		_ = picked
 	}
 }
@@ -74,6 +124,7 @@ func PassOverwrittenBeforeRead(xs []int) int {
 	var picked int
 	for _, x := range xs {
 		picked = x
+		break
 	}
 	picked = 0
 	return picked
