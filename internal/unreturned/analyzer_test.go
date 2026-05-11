@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"iter"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -65,12 +66,173 @@ func TestAnalyzer(t *testing.T) {
 	}
 }
 
+func TestAssignmentSequencesStop(t *testing.T) {
+	pass, funcs := checkedFunctions(t, `package p
+
+func direct(xs []int) int {
+	var a, b int
+	for _, x := range xs {
+		a, b = x, x
+		break
+	}
+	return a + b
+}
+
+func nested(xs []int) int {
+	var a int
+	for _, x := range xs {
+		if x > 0 {
+			a = x
+			break
+		}
+	}
+	return a
+}
+`)
+
+	directState := functionState{
+		pass:     pass,
+		localDef: localDefs(pass.TypesInfo, funcs["direct"].Body),
+	}
+	directLoop := onlyRangeLoop(t, funcs["direct"])
+	assign, ok := directLoop.Body.List[0].(*ast.AssignStmt)
+	if !ok {
+		t.Fatalf("direct loop starts with %T, want *ast.AssignStmt", directLoop.Body.List[0])
+	}
+
+	assignment, ok := firstValue(directState.assignStmtAssignments(assign, directLoop.For))
+	if !ok {
+		t.Fatal("assignStmtAssignments yielded no assignments")
+	}
+	if assignment.name != "a" {
+		t.Fatalf("first assignment is %q, want a", assignment.name)
+	}
+
+	nestedState := functionState{
+		pass:     pass,
+		localDef: localDefs(pass.TypesInfo, funcs["nested"].Body),
+	}
+	nestedLoop := onlyRangeLoop(t, funcs["nested"])
+	assignment, ok = firstValue(nestedState.assignments(nestedLoop.Body.List, nestedLoop.For, exitBreak, ""))
+	if !ok {
+		t.Fatal("assignments yielded no assignments")
+	}
+	if assignment.name != "a" {
+		t.Fatalf("nested assignment is %q, want a", assignment.name)
+	}
+}
+
+func TestNestedBlocksStops(t *testing.T) {
+	stmt := &ast.IfStmt{
+		Body: &ast.BlockStmt{List: []ast.Stmt{
+			&ast.ExprStmt{X: ast.NewIdent("body")},
+		}},
+		Else: &ast.IfStmt{
+			Body: &ast.BlockStmt{List: []ast.Stmt{
+				&ast.ExprStmt{X: ast.NewIdent("elseIf")},
+			}},
+		},
+	}
+
+	got := countValues(nestedBlocks(stmt), 1)
+	if got != 1 {
+		t.Fatalf("nestedBlocks yielded %d blocks before stop, want 1", got)
+	}
+
+	got = countValues(nestedBlocks(stmt), 2)
+	if got != 2 {
+		t.Fatalf("nestedBlocks yielded %d blocks before else-if stop, want 2", got)
+	}
+}
+
+func TestIsDirectExitRejectsUnknownExit(t *testing.T) {
+	stmt := &ast.BranchStmt{Tok: token.BREAK}
+	if isDirectExit(stmt, loopExit(99), "") {
+		t.Fatal("isDirectExit accepted an unknown exit kind")
+	}
+}
+
 func packageFiles(fset *token.FileSet, pkg *ast.Package) []*ast.File {
 	files := slices.Collect(maps.Values(pkg.Files))
 	slices.SortFunc(files, func(a, b *ast.File) int {
 		return strings.Compare(fset.Position(a.Package).Filename, fset.Position(b.Package).Filename)
 	})
 	return files
+}
+
+func firstValue[T any](seq iter.Seq[T]) (T, bool) {
+	for v := range seq {
+		return v, true
+	}
+	var zero T
+	return zero, false
+}
+
+func countValues[T any](seq iter.Seq[T], limit int) int {
+	count := 0
+	for range seq {
+		count++
+		if count == limit {
+			return count
+		}
+	}
+	return count
+}
+
+func checkedFunctions(t *testing.T, src string) (*analysis.Pass, map[string]*ast.FuncDecl) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "p.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := &types.Info{
+		Types:      make(map[ast.Expr]types.TypeAndValue),
+		Defs:       make(map[*ast.Ident]types.Object),
+		Uses:       make(map[*ast.Ident]types.Object),
+		Implicits:  make(map[ast.Node]types.Object),
+		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		Scopes:     make(map[ast.Node]*types.Scope),
+	}
+	conf := types.Config{Importer: importer.Default()}
+	pkg, err := conf.Check("p", fset, []*ast.File{file}, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	funcs := make(map[string]*ast.FuncDecl)
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok {
+			funcs[fn.Name.Name] = fn
+		}
+	}
+	pass := &analysis.Pass{
+		Analyzer:  Analyzer,
+		Fset:      fset,
+		Files:     []*ast.File{file},
+		Pkg:       pkg,
+		TypesInfo: info,
+	}
+	return pass, funcs
+}
+
+func onlyRangeLoop(t *testing.T, fn *ast.FuncDecl) *ast.RangeStmt {
+	t.Helper()
+	var loop *ast.RangeStmt
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if loop != nil {
+			return false
+		}
+		if stmt, ok := n.(*ast.RangeStmt); ok {
+			loop = stmt
+			return false
+		}
+		return true
+	})
+	if loop == nil {
+		t.Fatalf("%s has no range loop", fn.Name.Name)
+	}
+	return loop
 }
 
 func expectedFailures(t *testing.T, fset *token.FileSet, files []*ast.File) []string {

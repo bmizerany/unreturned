@@ -190,7 +190,7 @@ func (s functionState) assignments(stmts []ast.Stmt, loopPos token.Pos, exit loo
 		walk = func(stmts []ast.Stmt) bool {
 			for i, stmt := range stmts {
 				if s.hasExitBeforeContinue(stmts[i+1:], exit, loopLabel) {
-					for _, assignment := range s.directAssignments(stmt, loopPos) {
+					for assignment := range s.directAssignments(stmt, loopPos) {
 						if seen[assignment.obj] {
 							continue
 						}
@@ -212,26 +212,27 @@ func (s functionState) assignments(stmts []ast.Stmt, loopPos token.Pos, exit loo
 	}
 }
 
-func (s functionState) directAssignments(stmt ast.Stmt, loopPos token.Pos) []assignment {
-	switch stmt := stmt.(type) {
-	case *ast.AssignStmt:
-		return s.assignStmtAssignments(stmt, loopPos)
-	case *ast.IncDecStmt:
-		id, ok := stmt.X.(*ast.Ident)
-		if !ok {
-			return nil
+func (s functionState) directAssignments(stmt ast.Stmt, loopPos token.Pos) iter.Seq[assignment] {
+	return func(yield func(assignment) bool) {
+		switch stmt := stmt.(type) {
+		case *ast.AssignStmt:
+			s.assignStmtAssignments(stmt, loopPos)(yield)
+		case *ast.IncDecStmt:
+			id, ok := stmt.X.(*ast.Ident)
+			if !ok {
+				return
+			}
+			obj := s.pass.TypesInfo.Uses[id]
+			if obj == nil || !s.isOuterLocal(obj, loopPos) {
+				return
+			}
+			yield(assignment{obj: obj, name: id.Name})
 		}
-		obj := s.pass.TypesInfo.Uses[id]
-		if obj == nil || !s.isOuterLocal(obj, loopPos) {
-			return nil
-		}
-		return []assignment{{obj: obj, name: id.Name}}
 	}
-	return nil
 }
 
-func (s functionState) assignStmtAssignments(stmt *ast.AssignStmt, loopPos token.Pos) []assignment {
-	return slices.Collect(func(yield func(assignment) bool) {
+func (s functionState) assignStmtAssignments(stmt *ast.AssignStmt, loopPos token.Pos) iter.Seq[assignment] {
+	return func(yield func(assignment) bool) {
 		for i, lhs := range stmt.Lhs {
 			id, ok := lhs.(*ast.Ident)
 			if !ok {
@@ -248,7 +249,7 @@ func (s functionState) assignStmtAssignments(stmt *ast.AssignStmt, loopPos token
 				return
 			}
 		}
-	})
+	}
 }
 
 func (s functionState) assignedObject(tok token.Token, id *ast.Ident) types.Object {
