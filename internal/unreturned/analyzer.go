@@ -319,6 +319,10 @@ func isDirectStop(stmt ast.Stmt) bool {
 }
 
 func hasContinue(stmt ast.Stmt) bool {
+	switch stmt.(type) {
+	case *ast.ForStmt, *ast.RangeStmt:
+		return false
+	}
 	found := false
 	root := ast.Node(stmt)
 	ast.Inspect(stmt, func(n ast.Node) bool {
@@ -429,6 +433,7 @@ func (s functionState) accessIn(node ast.Node, target types.Object) accessKind {
 			}
 			if rangeAssignsObject(s.pass.TypesInfo, n, target) {
 				write = true
+				return false
 			}
 			switch s.accessIn(n.Body, target) {
 			case readAccess:
