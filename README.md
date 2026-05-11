@@ -23,6 +23,12 @@ Normal use is:
 go tool unreturned ./...
 ```
 
+To install the binary directly:
+
+```sh
+go install blake.io/unreturned/cmd/unreturned@latest
+```
+
 It can also be used as a `go vet` vettool:
 
 ```sh
