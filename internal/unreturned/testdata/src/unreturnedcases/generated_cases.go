@@ -108,6 +108,37 @@ outer:
 	return picked
 }
 
+func FailDoubleLabeledFor(xs []int) int {
+	var picked int
+	i := 0
+	if len(xs) < 0 {
+		goto outer
+	}
+outer:
+inner:
+	// Unreturned: Fail
+	for i < len(xs) {
+		picked = xs[i]
+		break inner
+	}
+	return picked
+}
+
+func FailDoubleLabeledRange(xs []int) int {
+	var picked int
+	if len(xs) < 0 {
+		goto outer
+	}
+outer:
+inner:
+	// Unreturned: Fail
+	for _, x := range xs {
+		picked = x
+		break inner
+	}
+	return picked
+}
+
 func FailDuplicateAssignBeforeBreak(xs []int) int {
 	var picked int
 	// Unreturned: Fail
@@ -222,7 +253,7 @@ func FailReadInAssignRHS(xs []int) int {
 		picked = x
 		break
 	}
-	other := picked
+	other := picked + pickInt(0)
 	return other
 }
 

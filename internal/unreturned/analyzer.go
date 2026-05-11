@@ -88,7 +88,7 @@ func (s functionState) inspectBlock(block *ast.BlockStmt) {
 			if end := s.jumpLoopEnd(block.List, i, stmt.Label.Name); end >= i {
 				s.reportJumpLoop(stmt.Pos(), stmt.Label.Name, block.List[i:end+1], block.List[end+1:])
 			}
-			switch stmt := stmt.Stmt.(type) {
+			switch stmt := unlabeledStmt(stmt.Stmt).(type) {
 			case *ast.ForStmt:
 				s.reportLoop(stmt.For, stmt.Body, block.List[i+1:])
 				s.inspectBlock(stmt.Body)
@@ -119,12 +119,6 @@ func (s functionState) inspectStmt(stmt ast.Stmt) {
 		case *ast.IfStmt:
 			s.inspectStmt(els)
 		}
-	case *ast.ForStmt:
-		s.reportLoop(stmt.For, stmt.Body, nil)
-		s.inspectBlock(stmt.Body)
-	case *ast.RangeStmt:
-		s.reportLoop(stmt.For, stmt.Body, nil)
-		s.inspectBlock(stmt.Body)
 	case *ast.SwitchStmt:
 		if stmt.Init != nil {
 			s.inspectStmt(stmt.Init)
@@ -152,8 +146,16 @@ func (s functionState) inspectStmt(stmt ast.Stmt) {
 			}
 			s.inspectBlock(&ast.BlockStmt{List: clause.Body})
 		}
-	case *ast.LabeledStmt:
-		s.inspectStmt(stmt.Stmt)
+	}
+}
+
+func unlabeledStmt(stmt ast.Stmt) ast.Stmt {
+	for {
+		label, ok := stmt.(*ast.LabeledStmt)
+		if !ok {
+			return stmt
+		}
+		stmt = label.Stmt
 	}
 }
 
