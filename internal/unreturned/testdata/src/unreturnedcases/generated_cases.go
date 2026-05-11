@@ -50,6 +50,18 @@ done:
 	return picked
 }
 
+func FailShadowedAppend(xs []int) []int {
+	var picked []int
+	append := func([]int, int) []int {
+		return nil
+	}
+	// Unreturned: Fail
+	for _, x := range xs {
+		picked = append(picked, x)
+	}
+	return picked
+}
+
 func PassRangeNoReadAfter(xs []int) {
 	var picked int
 	for _, x := range xs {
@@ -88,4 +100,20 @@ func PassPackageVariable(xs []int) int {
 		packageTemp = x
 	}
 	return packageTemp
+}
+
+func PassAppendAccumulation(xs []int) []int {
+	var picked []int
+	for _, x := range xs {
+		picked = append(picked, x)
+	}
+	return picked
+}
+
+func PassAppendAccumulationFor(xs []int) []int {
+	var picked []int
+	for i := range xs {
+		picked = append(picked, xs[i])
+	}
+	return picked
 }

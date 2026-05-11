@@ -181,13 +181,16 @@ func (s functionState) assignments(stmts []ast.Stmt, loopPos token.Pos) iter.Seq
 			for n := range preorder(stmt) {
 				switch n := n.(type) {
 				case *ast.AssignStmt:
-					for _, lhs := range n.Lhs {
+					for i, lhs := range n.Lhs {
 						id, ok := lhs.(*ast.Ident)
 						if !ok {
 							continue
 						}
 						obj := s.assignedObject(n.Tok, id)
 						if obj == nil || seen[obj] || !s.isOuterLocal(obj, loopPos) {
+							continue
+						}
+						if i < len(n.Rhs) && s.isBuiltinAppend(n.Rhs[i]) {
 							continue
 						}
 						seen[obj] = true
@@ -222,6 +225,19 @@ func (s functionState) assignedObject(tok token.Token, id *ast.Ident) types.Obje
 		return nil
 	}
 	return s.pass.TypesInfo.Uses[id]
+}
+
+func (s functionState) isBuiltinAppend(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := ast.Unparen(call.Fun).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	obj, ok := s.pass.TypesInfo.Uses[id].(*types.Builtin)
+	return ok && obj.Name() == "append"
 }
 
 func (s functionState) isOuterLocal(obj types.Object, pos token.Pos) bool {
