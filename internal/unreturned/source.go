@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"go/ast"
 	"go/build"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io"
 	"iter"
 	"os"
@@ -189,10 +191,6 @@ func patternFilesWithPathMode(pattern string, fullPath bool) ([]sourceInput, err
 	return dirFilesWithPathMode(pattern, fullPath)
 }
 
-func treeFiles(root string) ([]sourceInput, error) {
-	return treeFilesWithPathMode(root, false)
-}
-
 func treeFilesWithPathMode(root string, fullPath bool) ([]sourceInput, error) {
 	var paths []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -217,10 +215,6 @@ func treeFilesWithPathMode(root string, fullPath bool) ([]sourceInput, error) {
 	return candidateFilesWithPathMode(paths, fullPath)
 }
 
-func dirFiles(dir string) ([]sourceInput, error) {
-	return dirFilesWithPathMode(dir, false)
-}
-
 func dirFilesWithPathMode(dir string, fullPath bool) ([]sourceInput, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -240,10 +234,6 @@ type candidateResult struct {
 	file sourceInput
 	ok   bool
 	err  error
-}
-
-func candidateFiles(paths []string) ([]sourceInput, error) {
-	return candidateFilesWithPathMode(paths, false)
 }
 
 func candidateFilesWithPathMode(paths []string, fullPath bool) ([]sourceInput, error) {
@@ -343,9 +333,23 @@ func fileDiagnostics(file sourceInput) ([]sourceDiagnostic, error) {
 	if err != nil {
 		return nil, err
 	}
+	info := &types.Info{
+		Types:      make(map[ast.Expr]types.TypeAndValue),
+		Defs:       make(map[*ast.Ident]types.Object),
+		Uses:       make(map[*ast.Ident]types.Object),
+		Implicits:  make(map[ast.Node]types.Object),
+		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		Scopes:     make(map[ast.Node]*types.Scope),
+	}
+	conf := types.Config{
+		Importer: importer.Default(),
+		Error:    func(error) {},
+	}
+	_, _ = conf.Check(parsed.Name.Name, fset, []*ast.File{parsed}, info)
 	state := sourceFileState{
 		fset:       fset,
 		reportName: file.reportName,
+		info:       info,
 	}
 	return state.diagnostics(parsed), nil
 }
@@ -353,16 +357,17 @@ func fileDiagnostics(file sourceInput) ([]sourceDiagnostic, error) {
 type sourceFileState struct {
 	fset       *token.FileSet
 	reportName string
+	info       *types.Info
 	diags      []sourceDiagnostic
 }
 
 type sourceFunctionState struct {
 	file     *sourceFileState
-	localDef map[*ast.Object]bool
+	localDef map[types.Object]bool
 }
 
 type sourceAssignment struct {
-	obj  *ast.Object
+	obj  types.Object
 	name string
 }
 
@@ -374,23 +379,11 @@ func (s *sourceFileState) diagnostics(file *ast.File) []sourceDiagnostic {
 		}
 		state := sourceFunctionState{
 			file:     s,
-			localDef: sourceLocalDefs(fn.Body),
+			localDef: localDefs(s.info, fn.Body),
 		}
 		state.inspectBlock(fn.Body)
 	}
 	return s.diags
-}
-
-func sourceLocalDefs(body *ast.BlockStmt) map[*ast.Object]bool {
-	defs := make(map[*ast.Object]bool)
-	for n := range sourcePreorder(body) {
-		id, ok := n.(*ast.Ident)
-		if !ok || id.Obj == nil || id.Obj.Kind != ast.Var || id.Obj.Pos() != id.Pos() {
-			continue
-		}
-		defs[id.Obj] = true
-	}
-	return defs
 }
 
 func (s sourceFunctionState) inspectBlock(block *ast.BlockStmt) {
@@ -503,7 +496,7 @@ func (s sourceFunctionState) assignmentsIn(stmts []ast.Stmt, loopPos token.Pos, 
 
 func (s sourceFunctionState) assignments(stmts []ast.Stmt, loopPos token.Pos, exit loopExit, loopLabel string) iter.Seq[sourceAssignment] {
 	return func(yield func(sourceAssignment) bool) {
-		seen := make(map[*ast.Object]bool)
+		seen := make(map[types.Object]bool)
 		var walk func([]ast.Stmt) bool
 		walk = func(stmts []ast.Stmt) bool {
 			for i, stmt := range stmts {
@@ -540,7 +533,7 @@ func (s sourceFunctionState) directAssignments(stmt ast.Stmt, loopPos token.Pos)
 			if !ok {
 				return
 			}
-			obj := id.Obj
+			obj := s.file.info.Uses[id]
 			if obj == nil || !s.isOuterLocal(obj, loopPos) {
 				return
 			}
@@ -570,14 +563,14 @@ func (s sourceFunctionState) assignStmtAssignments(stmt *ast.AssignStmt, loopPos
 	}
 }
 
-func (s sourceFunctionState) assignedObject(tok token.Token, id *ast.Ident) *ast.Object {
+func (s sourceFunctionState) assignedObject(tok token.Token, id *ast.Ident) types.Object {
 	if id.Name == "_" {
 		return nil
 	}
-	if tok == token.DEFINE && id.Obj != nil && id.Obj.Pos() == id.Pos() {
+	if tok == token.DEFINE && s.file.info.Defs[id] != nil {
 		return nil
 	}
-	return id.Obj
+	return s.file.info.Uses[id]
 }
 
 func (s sourceFunctionState) isBuiltinAppend(expr ast.Expr) bool {
@@ -586,11 +579,19 @@ func (s sourceFunctionState) isBuiltinAppend(expr ast.Expr) bool {
 		return false
 	}
 	id, ok := ast.Unparen(call.Fun).(*ast.Ident)
-	return ok && id.Name == "append" && id.Obj == nil
+	if !ok {
+		return false
+	}
+	obj, ok := s.file.info.Uses[id].(*types.Builtin)
+	return ok && obj.Name() == "append"
 }
 
-func (s sourceFunctionState) isOuterLocal(obj *ast.Object, pos token.Pos) bool {
-	return obj != nil && obj.Kind == ast.Var && s.localDef[obj] && obj.Pos().IsValid() && obj.Pos() < pos
+func (s sourceFunctionState) isOuterLocal(obj types.Object, pos token.Pos) bool {
+	v, ok := obj.(*types.Var)
+	if !ok || v.IsField() || !s.localDef[obj] {
+		return false
+	}
+	return obj.Pos().IsValid() && obj.Pos() < pos
 }
 
 func (s sourceFunctionState) hasExitBeforeContinue(stmts []ast.Stmt, exit loopExit, loopLabel string) bool {
@@ -626,7 +627,7 @@ func (s sourceFunctionState) readAfter(assignments []sourceAssignment, stmts []a
 	return "", false
 }
 
-func (s sourceFunctionState) accessIn(node ast.Node, target *ast.Object) accessKind {
+func (s sourceFunctionState) accessIn(node ast.Node, target types.Object) accessKind {
 	var read, write bool
 	ast.Inspect(node, func(n ast.Node) bool {
 		if n == nil || read {
@@ -644,7 +645,7 @@ func (s sourceFunctionState) accessIn(node ast.Node, target *ast.Object) accessK
 				}
 			}
 			for _, lhs := range n.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && id.Obj == target {
+				if id, ok := lhs.(*ast.Ident); ok && s.file.info.Uses[id] == target {
 					if n.Tok == token.ASSIGN || n.Tok == token.DEFINE {
 						write = true
 						continue
@@ -659,7 +660,7 @@ func (s sourceFunctionState) accessIn(node ast.Node, target *ast.Object) accessK
 			}
 			return false
 		case *ast.IncDecStmt:
-			if id, ok := n.X.(*ast.Ident); ok && id.Obj == target {
+			if id, ok := n.X.(*ast.Ident); ok && s.file.info.Uses[id] == target {
 				read = true
 				return true
 			}
@@ -668,7 +669,7 @@ func (s sourceFunctionState) accessIn(node ast.Node, target *ast.Object) accessK
 				read = true
 				return true
 			}
-			if sourceRangeAssignsObject(n, target) {
+			if s.rangeAssignsObject(n, target) {
 				write = true
 				return false
 			}
@@ -680,7 +681,7 @@ func (s sourceFunctionState) accessIn(node ast.Node, target *ast.Object) accessK
 			}
 			return false
 		case *ast.Ident:
-			if n.Obj == target {
+			if s.file.info.Uses[n] == target {
 				read = true
 				return true
 			}
@@ -696,26 +697,26 @@ func (s sourceFunctionState) accessIn(node ast.Node, target *ast.Object) accessK
 	return noAccess
 }
 
-func (s sourceFunctionState) readsObject(node ast.Node, target *ast.Object) bool {
+func (s sourceFunctionState) readsObject(node ast.Node, target types.Object) bool {
 	for n := range sourcePreorder(node) {
 		id, ok := n.(*ast.Ident)
 		if !ok {
 			continue
 		}
-		if id.Obj == target {
+		if s.file.info.Uses[id] == target {
 			return true
 		}
 	}
 	return false
 }
 
-func sourceRangeAssignsObject(stmt *ast.RangeStmt, target *ast.Object) bool {
+func (s sourceFunctionState) rangeAssignsObject(stmt *ast.RangeStmt, target types.Object) bool {
 	for _, expr := range []ast.Expr{stmt.Key, stmt.Value} {
 		id, ok := expr.(*ast.Ident)
 		if !ok {
 			continue
 		}
-		if id.Obj == target {
+		if s.file.info.Uses[id] == target {
 			return true
 		}
 	}

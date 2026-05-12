@@ -2,12 +2,13 @@ package unreturned
 
 import (
 	"go/ast"
+	"go/build"
 	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
 	"iter"
-	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -20,13 +21,12 @@ import (
 func TestAnalyzer(t *testing.T) {
 	fset := token.NewFileSet()
 	dir := filepath.Join("testdata", "src", "unreturnedcases")
-	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
+	pkgs, err := testPackages(fset, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, astpkg := range pkgs {
+	for name, files := range pkgs {
 		t.Run(name, func(t *testing.T) {
-			files := packageFiles(fset, astpkg)
 			info := &types.Info{
 				Types:      make(map[ast.Expr]types.TypeAndValue),
 				Defs:       make(map[*ast.Ident]types.Object),
@@ -69,13 +69,13 @@ func TestAnalyzer(t *testing.T) {
 func TestSourceFastPath(t *testing.T) {
 	fset := token.NewFileSet()
 	dir := filepath.Join("testdata", "src", "unreturnedcases")
-	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
+	pkgs, err := testPackages(fset, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var files []*ast.File
-	for _, astpkg := range pkgs {
-		files = append(files, packageFiles(fset, astpkg)...)
+	for _, pkgFiles := range pkgs {
+		files = append(files, pkgFiles...)
 	}
 
 	expected := expectedFailures(t, fset, files)
@@ -226,12 +226,35 @@ func TestIsDirectExitRejectsUnknownExit(t *testing.T) {
 	}
 }
 
-func packageFiles(fset *token.FileSet, pkg *ast.Package) []*ast.File {
-	files := slices.Collect(maps.Values(pkg.Files))
-	slices.SortFunc(files, func(a, b *ast.File) int {
-		return strings.Compare(fset.Position(a.Package).Filename, fset.Position(b.Package).Filename)
-	})
-	return files
+func testPackages(fset *token.FileSet, dir string) (map[string][]*ast.File, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	pkgs := make(map[string][]*ast.File)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+			continue
+		}
+		ok, err := build.Default.MatchFile(dir, entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, entry.Name()), nil, parser.ParseComments)
+		if err != nil {
+			return nil, err
+		}
+		pkgs[file.Name.Name] = append(pkgs[file.Name.Name], file)
+	}
+	for _, files := range pkgs {
+		slices.SortFunc(files, func(a, b *ast.File) int {
+			return strings.Compare(fset.Position(a.Package).Filename, fset.Position(b.Package).Filename)
+		})
+	}
+	return pkgs, nil
 }
 
 func firstValue[T any](seq iter.Seq[T]) (T, bool) {
