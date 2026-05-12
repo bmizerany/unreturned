@@ -2,7 +2,6 @@ package unreturned
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"go/ast"
 	"go/build"
@@ -13,9 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"runtime/trace"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 )
@@ -49,8 +46,8 @@ func isLocalPattern(arg string) bool {
 }
 
 // RunSource checks args and writes diagnostics in the usual vet form.
-func RunSource(ctx context.Context, w io.Writer, args []string) (int, error) {
-	diags, err := SourceDiagnostics(ctx, args)
+func RunSource(w io.Writer, args []string) (int, error) {
+	diags, err := sourceDiagnostics(args)
 	if err != nil {
 		return 0, err
 	}
@@ -63,7 +60,7 @@ func RunSource(ctx context.Context, w io.Writer, args []string) (int, error) {
 	return 0, nil
 }
 
-type SourceDiagnostic struct {
+type sourceDiagnostic struct {
 	Filename string
 	Line     int
 	Column   int
@@ -75,20 +72,15 @@ type sourceInput struct {
 	src  []byte
 }
 
-// SourceDiagnostics checks local package patterns without loading or
+// sourceDiagnostics checks local package patterns without loading or
 // type-checking packages.
-func SourceDiagnostics(ctx context.Context, args []string) ([]SourceDiagnostic, error) {
-	var files []sourceInput
-	var err error
-	trace.WithRegion(ctx, "source.files", func() {
-		files, err = sourceFiles(args)
-	})
+func sourceDiagnostics(args []string) ([]sourceDiagnostic, error) {
+	files, err := sourceFiles(args)
 	if err != nil {
 		return nil, err
 	}
-	trace.Log(ctx, "files", fmt.Sprint(len(files)))
 
-	var diags []SourceDiagnostic
+	var diags []sourceDiagnostic
 	var mu sync.Mutex
 	var firstErr error
 	jobs := make(chan sourceInput)
@@ -97,40 +89,34 @@ func SourceDiagnostics(ctx context.Context, args []string) ([]SourceDiagnostic, 
 		return nil, nil
 	}
 
-	trace.WithRegion(ctx, "source.check", func() {
-		var wg sync.WaitGroup
-		for range workers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for file := range jobs {
-					got, err := fileDiagnostics(ctx, file)
-					mu.Lock()
-					if err != nil && firstErr == nil {
-						firstErr = err
-					}
-					diags = append(diags, got...)
-					mu.Unlock()
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for file := range jobs {
+				got, err := fileDiagnostics(file)
+				mu.Lock()
+				if err != nil && firstErr == nil {
+					firstErr = err
 				}
-			}()
-		}
-		for _, file := range files {
-			jobs <- file
-		}
-		close(jobs)
-		wg.Wait()
-	})
+				diags = append(diags, got...)
+				mu.Unlock()
+			}
+		})
+	}
+	for _, file := range files {
+		jobs <- file
+	}
+	close(jobs)
+	wg.Wait()
+
 	if firstErr != nil {
 		return nil, firstErr
 	}
-	sort.Slice(diags, func(i, j int) bool {
-		a, b := diags[i], diags[j]
-		return cmpDiag(a, b) < 0
-	})
+	slices.SortFunc(diags, cmpDiag)
 	return diags, nil
 }
 
-func cmpDiag(a, b SourceDiagnostic) int {
+func cmpDiag(a, b sourceDiagnostic) int {
 	if n := strings.Compare(a.Filename, b.Filename); n != 0 {
 		return n
 	}
@@ -231,14 +217,12 @@ func candidateFiles(paths []string) ([]sourceInput, error) {
 	results := make(chan candidateResult, workers)
 	var wg sync.WaitGroup
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for path := range jobs {
 				file, ok, err := candidateFile(path)
 				results <- candidateResult{file: file, ok: ok, err: err}
 			}
-		}()
+		})
 	}
 	go func() {
 		for _, path := range paths {
@@ -295,27 +279,19 @@ func isGoFile(name string) bool {
 	return strings.HasSuffix(name, ".go") && !strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "_")
 }
 
-func fileDiagnostics(ctx context.Context, file sourceInput) ([]SourceDiagnostic, error) {
-	var err error
-	var parsed *ast.File
+func fileDiagnostics(file sourceInput) ([]sourceDiagnostic, error) {
 	fset := token.NewFileSet()
-	trace.WithRegion(ctx, "source.parse", func() {
-		parsed, err = parser.ParseFile(fset, file.name, file.src, 0)
-	})
+	parsed, err := parser.ParseFile(fset, file.name, file.src, 0)
 	if err != nil {
 		return nil, err
 	}
 	state := sourceFileState{fset: fset}
-	var diags []SourceDiagnostic
-	trace.WithRegion(ctx, "source.analyze", func() {
-		diags = state.diagnostics(parsed)
-	})
-	return diags, nil
+	return state.diagnostics(parsed), nil
 }
 
 type sourceFileState struct {
 	fset  *token.FileSet
-	diags []SourceDiagnostic
+	diags []sourceDiagnostic
 }
 
 type sourceFunctionState struct {
@@ -328,7 +304,7 @@ type sourceAssignment struct {
 	name string
 }
 
-func (s *sourceFileState) diagnostics(file *ast.File) []SourceDiagnostic {
+func (s *sourceFileState) diagnostics(file *ast.File) []sourceDiagnostic {
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -451,7 +427,7 @@ func (s sourceFunctionState) reportJumpLoop(pos token.Pos, label string, body, a
 
 func (s sourceFunctionState) report(pos token.Pos, msg string) {
 	p := s.file.fset.Position(pos)
-	s.file.diags = append(s.file.diags, SourceDiagnostic{
+	s.file.diags = append(s.file.diags, sourceDiagnostic{
 		Filename: p.Filename,
 		Line:     p.Line,
 		Column:   p.Column,

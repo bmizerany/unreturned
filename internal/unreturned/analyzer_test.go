@@ -1,7 +1,6 @@
 package unreturned
 
 import (
-	"context"
 	"go/ast"
 	"go/importer"
 	"go/parser"
@@ -67,7 +66,7 @@ func TestAnalyzer(t *testing.T) {
 	}
 }
 
-func TestSourceDiagnostics(t *testing.T) {
+func TestSourceFastPath(t *testing.T) {
 	fset := token.NewFileSet()
 	dir := filepath.Join("testdata", "src", "unreturnedcases")
 	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
@@ -80,7 +79,7 @@ func TestSourceDiagnostics(t *testing.T) {
 	}
 
 	expected := expectedFailures(t, fset, files)
-	diags, err := SourceDiagnostics(context.Background(), []string{dir})
+	diags, err := sourceDiagnostics([]string{dir})
 	if err != nil {
 		t.Fatal(err)
 	}
