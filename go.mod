@@ -3,7 +3,7 @@ module blake.io/unreturned
 go 1.26
 
 tool (
-	blake.io/unreturned/cmd/unreturned
+	blake.io/unreturned
 	rsc.io/uncover
 )
 

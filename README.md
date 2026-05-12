@@ -63,7 +63,7 @@ return matches
 The module path is `blake.io/unreturned`. Add `unreturned` as a tool dependency:
 
 ```sh
-go get -tool blake.io/unreturned/cmd/unreturned@latest
+go get -tool blake.io/unreturned@latest
 ```
 
 ## Usage
@@ -77,7 +77,7 @@ go tool unreturned ./...
 To install the binary directly:
 
 ```sh
-go install blake.io/unreturned/cmd/unreturned@latest
+go install blake.io/unreturned@latest
 ```
 
 It can also be used as a `go vet` vettool:
