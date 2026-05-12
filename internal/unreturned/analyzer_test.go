@@ -1,6 +1,7 @@
 package unreturned
 
 import (
+	"context"
 	"go/ast"
 	"go/importer"
 	"go/parser"
@@ -63,6 +64,34 @@ func TestAnalyzer(t *testing.T) {
 				t.Fatalf("diagnostics:\n got: %v\nwant: %v", got, expected)
 			}
 		})
+	}
+}
+
+func TestSourceDiagnostics(t *testing.T) {
+	fset := token.NewFileSet()
+	dir := filepath.Join("testdata", "src", "unreturnedcases")
+	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []*ast.File
+	for _, astpkg := range pkgs {
+		files = append(files, packageFiles(fset, astpkg)...)
+	}
+
+	expected := expectedFailures(t, fset, files)
+	diags, err := SourceDiagnostics(context.Background(), []string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(diags))
+	for _, diag := range diags {
+		got = append(got, filepath.Base(diag.Filename)+":"+strconv.Itoa(diag.Line))
+	}
+	slices.Sort(expected)
+	slices.Sort(got)
+	if !slices.Equal(got, expected) {
+		t.Fatalf("diagnostics:\n got: %v\nwant: %v", got, expected)
 	}
 }
 
