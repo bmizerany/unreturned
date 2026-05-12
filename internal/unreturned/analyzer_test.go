@@ -241,7 +241,8 @@ func expectedFailures(t *testing.T, fset *token.FileSet, files []*ast.File) []st
 		for _, file := range files {
 			for _, group := range file.Comments {
 				for _, comment := range group.List {
-					text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+					text, _ := strings.CutPrefix(comment.Text, "//")
+					text = strings.TrimSpace(text)
 					if text != "Unreturned: Fail" {
 						continue
 					}

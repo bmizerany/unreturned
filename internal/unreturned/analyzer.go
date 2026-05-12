@@ -491,11 +491,12 @@ func rangeAssignsObject(info *types.Info, stmt *ast.RangeStmt, target types.Obje
 func (s functionState) jumpLoopEnd(stmts []ast.Stmt, labelIndex int, label string) int {
 	labelPos := stmts[labelIndex].Pos()
 	backward := false
-	for i := labelIndex + 1; i < len(stmts); i++ {
-		if _, ok := stmts[i].(*ast.LabeledStmt); ok && backward {
+	for offset, stmt := range stmts[labelIndex+1:] {
+		i := labelIndex + 1 + offset
+		if _, ok := stmt.(*ast.LabeledStmt); ok && backward {
 			return i - 1
 		}
-		if hasBackwardGoto(stmts[i], label, labelPos) {
+		if hasBackwardGoto(stmt, label, labelPos) {
 			backward = true
 		}
 	}
