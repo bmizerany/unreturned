@@ -359,17 +359,18 @@ func nestedBlocks(stmt ast.Stmt) iter.Seq[[]ast.Stmt] {
 		case *ast.BlockStmt:
 			yield(stmt.List)
 		case *ast.IfStmt:
-			if !yield(stmt.Body.List) {
-				return
-			}
-			switch els := stmt.Else.(type) {
-			case *ast.BlockStmt:
-				yield(els.List)
-			case *ast.IfStmt:
-				for block := range nestedBlocks(els) {
-					if !yield(block) {
-						return
-					}
+			for {
+				if !yield(stmt.Body.List) {
+					return
+				}
+				switch els := stmt.Else.(type) {
+				case *ast.BlockStmt:
+					yield(els.List)
+					return
+				case *ast.IfStmt:
+					stmt = els
+				default:
+					return
 				}
 			}
 		case *ast.LabeledStmt:
