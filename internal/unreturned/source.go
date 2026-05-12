@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -45,9 +46,30 @@ func isLocalPattern(arg string) bool {
 	return arg == "." || strings.HasPrefix(arg, "./") || strings.HasPrefix(arg, "../") || filepath.IsAbs(arg)
 }
 
+func SourceArgs(args []string) ([]string, bool, error) {
+	fullPath := fullPathFlag
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		switch {
+		case arg == "-fullpath":
+			fullPath = true
+		case strings.HasPrefix(arg, "-fullpath="):
+			v := strings.TrimPrefix(arg, "-fullpath=")
+			parsed, err := strconv.ParseBool(v)
+			if err != nil {
+				return nil, false, fmt.Errorf("invalid value for -fullpath: %s", v)
+			}
+			fullPath = parsed
+		default:
+			out = append(out, arg)
+		}
+	}
+	return out, fullPath, nil
+}
+
 // RunSource checks args and writes diagnostics in the usual vet form.
-func RunSource(w io.Writer, args []string) (int, error) {
-	diags, err := sourceDiagnostics(args)
+func RunSource(w io.Writer, args []string, fullPath bool) (int, error) {
+	diags, err := sourceDiagnosticsWithPathMode(args, fullPath)
 	if err != nil {
 		return 0, err
 	}
@@ -68,14 +90,19 @@ type sourceDiagnostic struct {
 }
 
 type sourceInput struct {
-	name string
-	src  []byte
+	name       string
+	reportName string
+	src        []byte
 }
 
 // sourceDiagnostics checks local package patterns without loading or
 // type-checking packages.
 func sourceDiagnostics(args []string) ([]sourceDiagnostic, error) {
-	files, err := sourceFiles(args)
+	return sourceDiagnosticsWithPathMode(args, false)
+}
+
+func sourceDiagnosticsWithPathMode(args []string, fullPath bool) ([]sourceDiagnostic, error) {
+	files, err := sourceFilesWithPathMode(args, fullPath)
 	if err != nil {
 		return nil, err
 	}
@@ -129,11 +156,11 @@ func cmpDiag(a, b sourceDiagnostic) int {
 	return strings.Compare(a.Message, b.Message)
 }
 
-func sourceFiles(args []string) ([]sourceInput, error) {
+func sourceFilesWithPathMode(args []string, fullPath bool) ([]sourceInput, error) {
 	seen := make(map[string]bool)
 	var files []sourceInput
 	for _, arg := range args {
-		got, err := patternFiles(arg)
+		got, err := patternFilesWithPathMode(arg, fullPath)
 		if err != nil {
 			return nil, err
 		}
@@ -151,18 +178,22 @@ func sourceFiles(args []string) ([]sourceInput, error) {
 	return files, nil
 }
 
-func patternFiles(pattern string) ([]sourceInput, error) {
-	if strings.HasSuffix(pattern, "/...") {
-		root := strings.TrimSuffix(pattern, "/...")
+func patternFilesWithPathMode(pattern string, fullPath bool) ([]sourceInput, error) {
+	if before, ok := strings.CutSuffix(pattern, "/..."); ok {
+		root := before
 		if root == "" {
 			root = "."
 		}
-		return treeFiles(root)
+		return treeFilesWithPathMode(root, fullPath)
 	}
-	return dirFiles(pattern)
+	return dirFilesWithPathMode(pattern, fullPath)
 }
 
 func treeFiles(root string) ([]sourceInput, error) {
+	return treeFilesWithPathMode(root, false)
+}
+
+func treeFilesWithPathMode(root string, fullPath bool) ([]sourceInput, error) {
 	var paths []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -183,10 +214,14 @@ func treeFiles(root string) ([]sourceInput, error) {
 	if err != nil {
 		return nil, err
 	}
-	return candidateFiles(paths)
+	return candidateFilesWithPathMode(paths, fullPath)
 }
 
 func dirFiles(dir string) ([]sourceInput, error) {
+	return dirFilesWithPathMode(dir, false)
+}
+
+func dirFilesWithPathMode(dir string, fullPath bool) ([]sourceInput, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -198,7 +233,7 @@ func dirFiles(dir string) ([]sourceInput, error) {
 		}
 		files = append(files, filepath.Join(dir, entry.Name()))
 	}
-	return candidateFiles(files)
+	return candidateFilesWithPathMode(files, fullPath)
 }
 
 type candidateResult struct {
@@ -208,6 +243,10 @@ type candidateResult struct {
 }
 
 func candidateFiles(paths []string) ([]sourceInput, error) {
+	return candidateFilesWithPathMode(paths, false)
+}
+
+func candidateFilesWithPathMode(paths []string, fullPath bool) ([]sourceInput, error) {
 	workers := min(runtime.GOMAXPROCS(0), len(paths))
 	if workers == 0 {
 		return nil, nil
@@ -219,7 +258,7 @@ func candidateFiles(paths []string) ([]sourceInput, error) {
 	for range workers {
 		wg.Go(func() {
 			for path := range jobs {
-				file, ok, err := candidateFile(path)
+				file, ok, err := candidateFile(path, fullPath)
 				results <- candidateResult{file: file, ok: ok, err: err}
 			}
 		})
@@ -249,7 +288,7 @@ func candidateFiles(paths []string) ([]sourceInput, error) {
 	return files, nil
 }
 
-func candidateFile(file string) (sourceInput, bool, error) {
+func candidateFile(file string, fullPath bool) (sourceInput, bool, error) {
 	src, err := os.ReadFile(file)
 	if err != nil {
 		return sourceInput{}, false, err
@@ -268,7 +307,26 @@ func candidateFile(file string) (sourceInput, bool, error) {
 	if err != nil {
 		return sourceInput{}, false, err
 	}
-	return sourceInput{name: abs, src: src}, true, nil
+	return sourceInput{
+		name:       abs,
+		reportName: sourceDisplayPath(abs, fullPath),
+		src:        src,
+	}, true, nil
+}
+
+func sourceDisplayPath(abs string, fullPath bool) string {
+	if fullPath {
+		return abs
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return abs
+	}
+	rel, err := filepath.Rel(wd, abs)
+	if err != nil {
+		return abs
+	}
+	return rel
 }
 
 func ignoredDir(name string) bool {
@@ -285,13 +343,17 @@ func fileDiagnostics(file sourceInput) ([]sourceDiagnostic, error) {
 	if err != nil {
 		return nil, err
 	}
-	state := sourceFileState{fset: fset}
+	state := sourceFileState{
+		fset:       fset,
+		reportName: file.reportName,
+	}
 	return state.diagnostics(parsed), nil
 }
 
 type sourceFileState struct {
-	fset  *token.FileSet
-	diags []sourceDiagnostic
+	fset       *token.FileSet
+	reportName string
+	diags      []sourceDiagnostic
 }
 
 type sourceFunctionState struct {
@@ -428,7 +490,7 @@ func (s sourceFunctionState) reportJumpLoop(pos token.Pos, label string, body, a
 func (s sourceFunctionState) report(pos token.Pos, msg string) {
 	p := s.file.fset.Position(pos)
 	s.file.diags = append(s.file.diags, sourceDiagnostic{
-		Filename: p.Filename,
+		Filename: s.file.reportName,
 		Line:     p.Line,
 		Column:   p.Column,
 		Message:  msg,

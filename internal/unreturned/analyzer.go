@@ -17,6 +17,12 @@ var Analyzer = &analysis.Analyzer{
 	Run:  run,
 }
 
+var fullPathFlag bool
+
+func init() {
+	Analyzer.Flags.BoolVar(&fullPathFlag, "fullpath", false, "print full file paths in diagnostics")
+}
+
 type functionState struct {
 	pass     *analysis.Pass
 	localDef map[types.Object]bool

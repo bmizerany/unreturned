@@ -13,9 +13,14 @@ import (
 
 func main() {
 	log.SetFlags(0)
-	args := os.Args[1:]
+	args, fullPath, err := unreturned.SourceArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+
 	if unreturned.CanRunSource(args) {
-		code, err := unreturned.RunSource(os.Stderr, args)
+		code, err := unreturned.RunSource(os.Stderr, args, fullPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
