@@ -1,4 +1,4 @@
-// Command unreturned reports loop-assigned results read after the loop exits.
+// Command unreturned reports loops that produce a value: extract as a function and return.
 package main
 
 import (

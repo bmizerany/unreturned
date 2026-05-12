@@ -10,10 +10,10 @@ import (
 	"golang.org/x/tools/go/analysis"
 )
 
-// Analyzer reports loop-assigned temporary variables read after the loop.
+// Analyzer reports loops that produce a value — extract as a function and return.
 var Analyzer = &analysis.Analyzer{
 	Name: "unreturned",
-	Doc:  "reports local variables assigned inside loops and read after the loop exits",
+	Doc:  "reports loops that produce a value; extract as a function and return",
 	Run:  run,
 }
 
@@ -165,7 +165,7 @@ func (s functionState) reportLoop(pos token.Pos, body *ast.BlockStmt, after []as
 		return
 	}
 	if name, ok := s.readAfter(assignments, after); ok {
-		s.pass.Reportf(pos, "return from a func instead of assigning %s before break and reading it after the loop", name)
+		s.pass.Reportf(pos, "loop produces %s; extract as a function and return", name)
 	}
 }
 
@@ -175,7 +175,7 @@ func (s functionState) reportJumpLoop(pos token.Pos, label string, body, after [
 		return
 	}
 	if name, ok := s.readAfter(assignments, after); ok {
-		s.pass.Reportf(pos, "return from a func instead of assigning %s before goto and reading it at the target", name)
+		s.pass.Reportf(pos, "jump-loop produces %s; extract as a function and return", name)
 	}
 }
 

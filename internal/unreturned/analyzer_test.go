@@ -104,8 +104,8 @@ done:
 	}
 
 	want := []string{
-		"return from a func instead of assigning picked before break and reading it after the loop",
-		"return from a func instead of assigning picked before goto and reading it at the target",
+		"loop produces picked; extract as a function and return",
+		"jump-loop produces picked; extract as a function and return",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("diagnostics:\n got: %v\nwant: %v", got, want)
