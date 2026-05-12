@@ -165,7 +165,7 @@ func (s functionState) reportLoop(pos token.Pos, body *ast.BlockStmt, after []as
 		return
 	}
 	if name, ok := s.readAfter(assignments, after); ok {
-		s.pass.Reportf(pos, "variable %s is assigned inside a loop and read after the loop exits", name)
+		s.pass.Reportf(pos, "assignment to %s before break can be simplified by enclosing the loop in a func and using return", name)
 	}
 }
 
@@ -175,7 +175,7 @@ func (s functionState) reportJumpLoop(pos token.Pos, label string, body, after [
 		return
 	}
 	if name, ok := s.readAfter(assignments, after); ok {
-		s.pass.Reportf(pos, "variable %s is assigned inside a jump loop and read after the loop exits", name)
+		s.pass.Reportf(pos, "assignment to %s before goto can be simplified by enclosing the loop in a func and using return", name)
 	}
 }
 

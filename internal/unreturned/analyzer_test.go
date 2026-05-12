@@ -66,6 +66,52 @@ func TestAnalyzer(t *testing.T) {
 	}
 }
 
+func TestDiagnosticText(t *testing.T) {
+	pass, _ := checkedFunctions(t, `package p
+
+func byBreak(xs []int) int {
+	var picked int
+	for _, x := range xs {
+		picked = x
+		break
+	}
+	return picked
+}
+
+func byGoto(xs []int) int {
+	var picked int
+	i := 0
+again:
+	if i >= len(xs) {
+		goto done
+	}
+	if xs[i] == 0 {
+		i++
+		goto again
+	}
+	picked = xs[i]
+	goto done
+done:
+	return picked
+}
+`)
+	var got []string
+	pass.Report = func(diag analysis.Diagnostic) {
+		got = append(got, diag.Message)
+	}
+	if _, err := Analyzer.Run(pass); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"assignment to picked before break can be simplified by enclosing the loop in a func and using return",
+		"assignment to picked before goto can be simplified by enclosing the loop in a func and using return",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("diagnostics:\n got: %v\nwant: %v", got, want)
+	}
+}
+
 func TestAssignmentSequencesStop(t *testing.T) {
 	pass, funcs := checkedFunctions(t, `package p
 
