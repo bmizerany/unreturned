@@ -104,8 +104,8 @@ done:
 	}
 
 	want := []string{
-		"assignment to picked before break can be simplified by enclosing the loop in a func and using return",
-		"assignment to picked before goto can be simplified by enclosing the loop in a func and using return",
+		"return from a func instead of assigning picked before break and reading it after the loop",
+		"return from a func instead of assigning picked before goto and reading it at the target",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("diagnostics:\n got: %v\nwant: %v", got, want)
